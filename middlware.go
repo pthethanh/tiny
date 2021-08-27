@@ -29,7 +29,9 @@ func AuthRequired(loginPath string, authInfoFunc AuthInfoFunc) func(http.Handler
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			if _, ok := authInfoFunc(r.Context()); !ok {
 				http.Redirect(rw, r, fmt.Sprintf("%s?redirect=%s", loginPath, r.URL.Path), http.StatusFound)
+				return
 			}
+			h.ServeHTTP(rw, r)
 		})
 	}
 }
