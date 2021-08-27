@@ -8,16 +8,13 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"reflect"
 	"sync"
 	"time"
 
+	"log"
+
 	"github.com/gorilla/mux"
-	"github.com/pthethanh/micro/auth/jwt"
-	"github.com/pthethanh/micro/log"
-	"github.com/pthethanh/micro/status"
 	"github.com/pthethanh/tiny/funcs"
-	"google.golang.org/grpc/codes"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,28 +36,61 @@ type (
 	// this is just for quickly create a small site like blog.
 	// Note that templates must use tag [[.]] instead of {{.}}
 	Site struct {
-		CacheMaxAge   time.Duration       `yaml:"cache_max_age"`
-		MetaData      MetaData            `yaml:"metadata"`
-		Reload        bool                `yaml:"reload"`
-		Static        string              `yaml:"static"`
-		StaticPrefix  string              `yaml:"static_prefix"`
-		Login         string              `yaml:"login"`
-		Layouts       map[string][]string `yaml:"layouts"`
-		Pages         map[string]Page     `yaml:"pages"`
-		ErrorHandlers map[uint32]string   `yaml:"error_handlers"`
+		CacheMaxAge  time.Duration       `yaml:"cache_max_age"`
+		MetaData     MetaData            `yaml:"metadata"`
+		Reload       bool                `yaml:"reload"`
+		Static       string              `yaml:"static"`
+		StaticPrefix string              `yaml:"static_prefix"`
+		Login        string              `yaml:"login"`
+		Layouts      map[string][]string `yaml:"layouts"`
+		Pages        map[string]Page     `yaml:"pages"`
+		Errors       map[uint32]string   `yaml:"errors"`
 
-		once            sync.Once
-		router          *mux.Router
-		templates       map[string]*template.Template
-		mu              sync.RWMutex
-		funcs           map[string]interface{}
-		extractAuthInfo AuthInfoFunc
+		once      sync.Once
+		router    *mux.Router
+		templates map[string]*template.Template
+		mu        sync.RWMutex
+		funcs     map[string]interface{}
+		authInfo  AuthInfoFunc
 	}
 
-	DataHandler          = func(rw http.ResponseWriter, r *http.Request) interface{}
-	SiteMapDataHandler   = func(rw http.ResponseWriter, r *http.Request) SiteMap
-	RobotsTXTDataHandler = func(rw http.ResponseWriter, r *http.Request) RobotsTXT
-	AuthInfoFunc         = func(context.Context) (jwt.Claims, bool)
+	// UserClaims represents the claims provided by the JWT.
+	UserClaims struct {
+		// Auth claims
+		Audience  string `json:"aud,omitempty"`
+		ExpiresAt int64  `json:"exp,omitempty"`
+		ID        string `json:"jti,omitempty"`
+		IssuedAt  int64  `json:"iat,omitempty"`
+		Issuer    string `json:"iss,omitempty"`
+		NotBefore int64  `json:"nbf,omitempty"`
+		Subject   string `json:"sub,omitempty"`
+
+		// User attributes claims
+		Name                string `json:"name,omitempty"`
+		GivenName           string `json:"given_name,omitempty"`
+		FamilyName          string `json:"family_name,omitempty"`
+		MiddleName          string `json:"middle_name,omitempty"`
+		Nickname            string `json:"nickname,omitempty"`
+		PreferredUsername   string `json:"preferred_username,omitempty"`
+		Profile             string `json:"profile,omitempty"`
+		Picture             string `json:"picture,omitempty"`
+		Website             string `json:"website,omitempty"`
+		Email               string `json:"email,omitempty"`
+		EmailVerified       bool   `json:"email_verified,omitempty"`
+		Gender              string `json:"gender,omitempty"`
+		Birthdate           string `json:"birthdate,omitempty"`
+		Zoneinfo            string `json:"zoneinfo,omitempty"`
+		Locale              string `json:"locale,omitempty"`
+		PhoneNumber         string `json:"phone_number,omitempty"`
+		PhoneNumberVerified bool   `json:"phone_number_verified,omitempty"`
+		Address             string `json:"address,omitempty"`
+		UpdatedAt           int64  `json:"updated_at,omitempty"`
+
+		// Custom attributes claims.
+		Scope    string                 `json:"scope,omitempty"`
+		Admin    bool                   `json:"admin,omitempty"`
+		Metadata map[string]interface{} `json:"metadata,omitempty"`
+	}
 
 	// Page prepresent a web page.
 	Page struct {
@@ -78,8 +108,8 @@ type (
 	PageData struct {
 		MetaData      MetaData
 		Authenticated bool
-		User          jwt.Claims
-		Error         status.Code
+		User          UserClaims
+		Error         error
 		Cookies       map[string]*http.Cookie
 	}
 
@@ -117,6 +147,11 @@ type (
 	RobotsTXT struct {
 		UserAgents []UserAgent
 	}
+
+	DataHandler          = func(rw http.ResponseWriter, r *http.Request) interface{}
+	SiteMapDataHandler   = func(rw http.ResponseWriter, r *http.Request) SiteMap
+	RobotsTXTDataHandler = func(rw http.ResponseWriter, r *http.Request) RobotsTXT
+	AuthInfoFunc         = func(context.Context) (UserClaims, bool)
 )
 
 // NewSite read site definition from yaml config file.
@@ -142,12 +177,11 @@ func NewSite(path string, options ...Option) *Site {
 		},
 		Pages: map[string]Page{},
 		mu:    sync.RWMutex{},
-		ErrorHandlers: map[uint32]string{
-			uint32(codes.NotFound): PageNotFound,
+		Errors: map[uint32]string{
+			http.StatusNotFound: PageNotFound,
 		},
-		funcs:           funcs.FuncMap(),
-		extractAuthInfo: jwt.FromContext,
-		templates:       make(map[string]*template.Template),
+		funcs:     funcs.FuncMap(),
+		templates: make(map[string]*template.Template),
 	}
 	if err := yaml.Unmarshal(b, &site); err != nil {
 		log.Panic(err)
@@ -168,17 +202,21 @@ func NewSite(path string, options ...Option) *Site {
 }
 
 // GetPageData get common data from configuration and request.
-func (site *Site) GetPageData(pageName string, r *http.Request, err ...error) PageData {
-	claims, authenticated := site.extractAuthInfo(r.Context())
-	code := status.OK("").Code()
-	if len(err) > 0 {
-		code = status.Convert(err[0]).Code()
+func (site *Site) GetPageData(pageName string, r *http.Request, errs ...error) PageData {
+	claims := UserClaims{}
+	authenticated := false
+	if site.authInfo != nil {
+		claims, authenticated = site.authInfo(r.Context())
+	}
+	var err error
+	if len(errs) > 0 {
+		err = errs[0]
 	}
 	data := PageData{
 		MetaData:      site.getPageMetaData(pageName),
 		Authenticated: authenticated,
 		User:          claims,
-		Error:         code,
+		Error:         err,
 		Cookies:       make(map[string]*http.Cookie),
 	}
 	for _, ck := range r.Cookies() {
@@ -200,7 +238,7 @@ func (site *Site) ServePage(name string) http.Handler {
 			return
 		}
 		if err := site.handlePage(rw, r, name, data); err != nil {
-			log.Context(r.Context()).Errorf("template:%s, err: %v", name, err)
+			log.Printf("template:%s, err: %v\n", name, err)
 			site.handleError(rw, r, err)
 			return
 		}
@@ -217,10 +255,10 @@ func (site *Site) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		router := mux.NewRouter()
 		router.PathPrefix(site.StaticPrefix).Handler(site.ServeStatic(site.StaticPrefix))
 		for name, p := range site.Pages {
-			log.Infof("register page: %s, path: %s, method: %s", name, p.Path, http.MethodGet)
+			log.Printf("register page: %s, path: %s, method: %s\n", name, p.Path, http.MethodGet)
 			h := site.ServePage(name)
 			if p.Auth {
-				h = AuthRequired(site.Login)(h)
+				h = AuthRequired(site.Login, site.authInfo)(h)
 			}
 			router.Path(p.Path).Methods(http.MethodGet).Handler(h)
 		}
@@ -244,7 +282,7 @@ func (site *Site) SetDataHandler(name string, h DataHandler) error {
 	defer site.mu.Unlock()
 	p, ok := site.Pages[name]
 	if !ok {
-		return status.NotFound("page not found")
+		return Error(http.StatusNotFound, "page not found")
 	}
 	p.DataHandler = h
 	site.Pages[name] = p
@@ -253,11 +291,7 @@ func (site *Site) SetDataHandler(name string, h DataHandler) error {
 
 func (site *Site) SetSiteMapDataHandler(name string, h SiteMapDataHandler) error {
 	return site.SetDataHandler(name, func(rw http.ResponseWriter, r *http.Request) interface{} {
-		data := h(rw, r)
-		if reflect.DeepEqual(data.PageData, PageData{}) {
-			data.PageData = site.GetPageData(name, r)
-		}
-		return data
+		return h(rw, r)
 	})
 }
 
@@ -350,12 +384,12 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	// parse the template.
 	page, ok := site.Pages[name]
 	if !ok {
-		return nil, status.NotFound("page not found")
+		return nil, Error(http.StatusNotFound, "page not found")
 	}
 	layout := site.Layouts[page.Layout]
 	files := append(layout, page.Components...)
 	if len(files) == 0 {
-		return nil, status.NotFound("no templates found")
+		return nil, Error(http.StatusNotFound, "no templates found")
 	}
 	tplName := page.Layout
 	if page.Layout == "" {
@@ -366,12 +400,12 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	}
 	tpl, err := template.New(tplName).Delims("[[", "]]").Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
 	if err != nil {
-		log.Errorf("template: parse common template, err: %v", err)
+		log.Printf("template: parse common template, err: %v\n", err)
 		return nil, err
 	}
 	tpl, err = tpl.ParseFiles(files...)
 	if err != nil {
-		log.Errorf("template: parse template, err: %v", err)
+		log.Printf("template: parse template, err: %v\n", err)
 		return nil, err
 	}
 	site.templates[name] = tpl
@@ -380,17 +414,11 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 
 func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error) {
 	name := PageError
-	code := uint32(0)
-	if e, ok := err.(interface{ Code() uint32 }); ok {
-		code = e.Code()
-	} else {
-		code = uint32(status.Convert(err).Code())
-	}
-	if t, ok := site.ErrorHandlers[code]; ok {
+	if t, ok := site.Errors[ErrorFromErr(err).Code()]; ok {
 		name = t
 	}
 	if err := site.handlePage(rw, r, name, site.GetPageData(name, r, err)); err != nil {
-		log.Context(r.Context()).Errorf("template: serve error page, err: %v", err)
+		log.Printf("template: serve error page, err: %v\n", err)
 		http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
 }
@@ -398,7 +426,7 @@ func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error
 func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string, data interface{}) error {
 	t, err := site.parseTemplate(name)
 	if err != nil {
-		log.Context(r.Context()).Errorf("template:%s parse failed, err: %v", name, err)
+		log.Printf("template:%s parse failed, err: %v\n", name, err)
 		return err
 	}
 	if data == nil {

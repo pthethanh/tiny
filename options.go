@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-
-	"github.com/pthethanh/micro/status"
 )
 
 type (
@@ -26,7 +24,7 @@ func Funcs(funcs map[string]interface{}) Option {
 
 func AuthInfo(f AuthInfoFunc) Option {
 	return func(site *Site) {
-		site.extractAuthInfo = f
+		site.authInfo = f
 	}
 }
 
@@ -37,10 +35,10 @@ func JSONFileDataHandler(f string, reload bool) DataHandler {
 		data := make(map[string]interface{})
 		b, err := os.ReadFile(f)
 		if err != nil {
-			return nil, status.Internal("read data from file, err: %v", err)
+			return nil, Error(http.StatusInternalServerError, "read data from file, err: %v", err)
 		}
 		if err := json.Unmarshal(b, &data); err != nil {
-			return nil, status.Internal("invalid data, err: %v", err)
+			return nil, Error(http.StatusInternalServerError, "invalid data, err: %v", err)
 		}
 		return data, nil
 	}

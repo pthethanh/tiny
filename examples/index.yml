@@ -42,3 +42,6 @@ pages:
       title: About
     auth: false
     data: web/data/about.json
+errors:
+  404: not_found
+  500: error
