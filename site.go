@@ -1,11 +1,12 @@
 package tiny
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"html/template"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"path"
 	"reflect"
 	"sync"
@@ -27,8 +28,10 @@ var (
 )
 
 const (
-	pageNotFound = "not_found"
-	pageError    = "error"
+	PageNotFound   = "not_found"
+	PageError      = "error"
+	PageRobotsTxt  = "robots.txt"
+	PageSitemapXML = "sitemap.xml"
 )
 
 type (
@@ -41,25 +44,23 @@ type (
 		Reload        bool                `yaml:"reload"`
 		Static        string              `yaml:"static"`
 		StaticPrefix  string              `yaml:"static_prefix"`
+		Login         string              `yaml:"login"`
 		Layouts       map[string][]string `yaml:"layouts"`
 		Pages         map[string]Page     `yaml:"pages"`
 		ErrorHandlers map[uint32]string   `yaml:"error_handlers"`
-		Login         string              `yaml:"login"`
 
-		once      sync.Once
-		router    *mux.Router
-		templates map[string]*template.Template
-		mu        sync.RWMutex
-		funcs     map[string]interface{}
+		once            sync.Once
+		router          *mux.Router
+		templates       map[string]*template.Template
+		mu              sync.RWMutex
+		funcs           map[string]interface{}
+		extractAuthInfo AuthInfoFunc
 	}
 
-	DataHandler          func(rw http.ResponseWriter, r *http.Request) interface{}
-	SiteMapDataHandler   func(rw http.ResponseWriter, r *http.Request) SiteMap
-	RobotsTXTDataHandler func(rw http.ResponseWriter, r *http.Request) RobotsTXT
-
-	DataHandlerService interface {
-		DataHandlers() map[string]DataHandler
-	}
+	DataHandler          = func(rw http.ResponseWriter, r *http.Request) interface{}
+	SiteMapDataHandler   = func(rw http.ResponseWriter, r *http.Request) SiteMap
+	RobotsTXTDataHandler = func(rw http.ResponseWriter, r *http.Request) RobotsTXT
+	AuthInfoFunc         = func(context.Context) (jwt.Claims, bool)
 
 	// Page prepresent a web page.
 	Page struct {
@@ -68,6 +69,7 @@ type (
 		Components  []string `yaml:"components"`
 		MetaData    MetaData `yaml:"metadata"`
 		Auth        bool     `yaml:"auth"`
+		Data        string   `yaml:"data"`
 		DataHandler DataHandler
 
 		embed bool
@@ -120,12 +122,13 @@ type (
 // NewSite read site definition from yaml config file.
 // Panics if any error.
 func NewSite(path string, options ...Option) *Site {
-	b, err := ioutil.ReadFile(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		log.Panic(err)
 	}
 	site := Site{
-		Static: "web/dist/static/",
+		Static:       "web/dist/static/",
+		StaticPrefix: "/static/",
 		MetaData: MetaData{
 			Lang:        "en",
 			Author:      "tiny",
@@ -135,38 +138,38 @@ func NewSite(path string, options ...Option) *Site {
 			Title:       "Tiny",
 			Type:        "WebSite",
 			SiteName:    "Tiny",
+			Version:     "v0.0.1",
 		},
 		Pages: map[string]Page{},
 		mu:    sync.RWMutex{},
 		ErrorHandlers: map[uint32]string{
-			uint32(codes.NotFound): pageNotFound,
+			uint32(codes.NotFound): PageNotFound,
 		},
+		funcs:           funcs.FuncMap(),
+		extractAuthInfo: jwt.FromContext,
+		templates:       make(map[string]*template.Template),
 	}
 	if err := yaml.Unmarshal(b, &site); err != nil {
 		log.Panic(err)
 	}
-	options = append(options, Funcs(funcs.FuncMap()))
+	// apply user options
 	for _, opt := range options {
 		opt(&site)
 	}
-	site.templates = make(map[string]*template.Template)
+	// add default pages if not exists
 	site.addDefaultPagesIfNotExists()
-	if site.MetaData.Version == "" {
-		site.MetaData.Version = "v0.0.1"
-	}
-	if site.funcs == nil {
-		site.funcs = funcs.FuncMap()
-	}
-	if site.StaticPrefix == "" {
-		site.StaticPrefix = "/static/"
+	// set data handler from JSON file if defined.
+	for n, p := range site.Pages {
+		if p.Data != "" {
+			site.SetDataHandler(n, JSONFileDataHandler(p.Data))
+		}
 	}
 	return &site
 }
 
 // GetPageData get common data from configuration and request.
 func (site *Site) GetPageData(pageName string, r *http.Request, err ...error) PageData {
-	authenticated := false
-	claims, authenticated := jwt.FromContext(r.Context())
+	claims, authenticated := site.extractAuthInfo(r.Context())
 	code := status.OK("").Code()
 	if len(err) > 0 {
 		code = status.Convert(err[0]).Code()
@@ -221,16 +224,10 @@ func (site *Site) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			}
 			router.Path(p.Path).Methods(http.MethodGet).Handler(h)
 		}
-		router.NotFoundHandler = site.ServePage(pageNotFound)
+		router.NotFoundHandler = site.ServePage(PageNotFound)
 		site.router = router
 	})
 	site.router.ServeHTTP(rw, r)
-}
-
-func (site *Site) RegisterDataHandlers(services ...DataHandlerService) {
-	for _, srv := range services {
-		site.SetDataHandlers(srv.DataHandlers())
-	}
 }
 
 func (site *Site) SetDataHandlers(handlers map[string]DataHandler) error {
@@ -271,19 +268,19 @@ func (site *Site) SetRobotsTXTDataHandler(name string, h RobotsTXTDataHandler) e
 }
 
 func (site *Site) addDefaultPagesIfNotExists() {
-	if _, ok := site.Pages["robots.txt"]; !ok {
+	if _, ok := site.Pages[PageRobotsTxt]; !ok {
 		site.addDefaultRobotsTxt()
 	}
-	if _, ok := site.Pages["sitemap.xml"]; !ok {
+	if _, ok := site.Pages[PageSitemapXML]; !ok {
 		site.addDefaultSiteMap()
 	}
-	if _, ok := site.Pages[pageError]; !ok {
-		site.addEmbedPage(pageError, defaultTemplates, "templates/error.html", Page{
+	if _, ok := site.Pages[PageError]; !ok {
+		site.addEmbedPage(PageError, defaultTemplates, "templates/error.html", Page{
 			Path: "/error",
 		})
 	}
-	if _, ok := site.Pages[pageNotFound]; !ok {
-		site.addEmbedPage(pageNotFound, defaultTemplates, "templates/not_found.html", Page{
+	if _, ok := site.Pages[PageNotFound]; !ok {
+		site.addEmbedPage(PageNotFound, defaultTemplates, "templates/not_found.html", Page{
 			Path: "/404",
 		})
 	}
@@ -342,45 +339,54 @@ func (site *Site) getPageMetaData(name string) MetaData {
 // use [[]] for delimiter tag.
 func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	tpl, loaded := site.templates[name]
+	// if it's embed template, no need  to parse again.
 	if loaded && site.Pages[name].embed {
 		return tpl, nil
 	}
-	if !loaded || site.Reload {
-		page, ok := site.Pages[name]
-		if !ok {
-			return nil, status.NotFound("page not found")
-		}
-		layout := site.Layouts[page.Layout]
-		files := append(layout, page.Components...)
-		if len(files) == 0 {
-			return nil, status.NotFound("no templates found")
-		}
-		tplName := page.Layout
-		if page.Layout == "" {
-			tplName = path.Base(files[0])
-		}
-		if path.Ext(tplName) == "" {
-			tplName = fmt.Sprintf("%s.html", tplName)
-		}
-		t, err := template.New(tplName).Delims("[[", "]]").Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
-		if err != nil {
-			log.Errorf("template: parse common template, err: %v", err)
-			return nil, err
-		}
-		t, err = t.ParseFiles(files...)
-		if err != nil {
-			log.Errorf("template: parse template, err: %v", err)
-			return nil, err
-		}
-		site.templates[name] = t
-		tpl = t
+	// if loaded and Reload is disabled, return.
+	if loaded && !site.Reload {
+		return tpl, nil
 	}
+	// parse the template.
+	page, ok := site.Pages[name]
+	if !ok {
+		return nil, status.NotFound("page not found")
+	}
+	layout := site.Layouts[page.Layout]
+	files := append(layout, page.Components...)
+	if len(files) == 0 {
+		return nil, status.NotFound("no templates found")
+	}
+	tplName := page.Layout
+	if page.Layout == "" {
+		tplName = path.Base(files[0])
+	}
+	if path.Ext(tplName) == "" {
+		tplName = fmt.Sprintf("%s.html", tplName)
+	}
+	tpl, err := template.New(tplName).Delims("[[", "]]").Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
+	if err != nil {
+		log.Errorf("template: parse common template, err: %v", err)
+		return nil, err
+	}
+	tpl, err = tpl.ParseFiles(files...)
+	if err != nil {
+		log.Errorf("template: parse template, err: %v", err)
+		return nil, err
+	}
+	site.templates[name] = tpl
 	return tpl, nil
 }
 
 func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error) {
-	name := pageError
-	if t, ok := site.ErrorHandlers[uint32(status.Convert(err).Code())]; ok {
+	name := PageError
+	code := uint32(0)
+	if e, ok := err.(interface{ Code() uint32 }); ok {
+		code = e.Code()
+	} else {
+		code = uint32(status.Convert(err).Code())
+	}
+	if t, ok := site.ErrorHandlers[code]; ok {
 		name = t
 	}
 	if err := site.handlePage(rw, r, name, site.GetPageData(name, r, err)); err != nil {
@@ -416,11 +422,11 @@ func (site *Site) addEmbedPage(name string, fs embed.FS, pattern string, p Page)
 }
 
 func (site *Site) addDefaultSiteMap() {
-	site.addEmbedPage("sitemap.xml", defaultTemplates, "templates/sitemap.xml", Page{
+	site.addEmbedPage(PageSitemapXML, defaultTemplates, "templates/sitemap.xml", Page{
 		Path: "/sitemap.xml",
 		DataHandler: func(rw http.ResponseWriter, r *http.Request) interface{} {
 			return SiteMap{
-				PageData: site.GetPageData("sitemap.xml", r),
+				PageData: site.GetPageData(PageSitemapXML, r),
 				URLSet: []SiteMapURL{
 					{
 						Loc:        "/",
@@ -435,7 +441,7 @@ func (site *Site) addDefaultSiteMap() {
 }
 
 func (site *Site) addDefaultRobotsTxt() {
-	site.addEmbedPage("robots.txt", defaultTemplates, "templates/robots.txt", Page{
+	site.addEmbedPage(PageRobotsTxt, defaultTemplates, "templates/robots.txt", Page{
 		Path: "/robots.txt",
 		DataHandler: func(rw http.ResponseWriter, r *http.Request) interface{} {
 			return RobotsTXT{

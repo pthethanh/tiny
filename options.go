@@ -1,5 +1,11 @@
 package tiny
 
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+)
+
 type (
 	Option func(site *Site)
 )
@@ -13,5 +19,27 @@ func Funcs(funcs map[string]interface{}) Option {
 		for k, v := range funcs {
 			site.funcs[k] = v
 		}
+	}
+}
+
+func AuthInfo(f AuthInfoFunc) Option {
+	return func(site *Site) {
+		site.extractAuthInfo = f
+	}
+}
+
+// JSONFileDataHandler return DataHandler that read data from the given file.
+// Panics if failed to read the file.
+func JSONFileDataHandler(f string) DataHandler {
+	data := make(map[string]interface{})
+	b, err := os.ReadFile(f)
+	if err != nil {
+		panic(err)
+	}
+	if err := json.Unmarshal(b, &data); err != nil {
+		panic(err)
+	}
+	return func(rw http.ResponseWriter, r *http.Request) interface{} {
+		return data
 	}
 }
