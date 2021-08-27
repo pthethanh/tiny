@@ -1,0 +1,44 @@
+cache_max_age: 168h
+metadata:
+  version: 0.0.1
+  lang: en
+  site_name: tiny
+  title: tiny
+  domain: localhost
+  base_url: http://localhost:8000
+  canonical_url: http://localhost:8000
+  key_words:
+    - tiny
+  author: pthethanh
+  type: Website
+  image: /static/images/header.jpg
+  description: tiny - ideas worth sharing.
+reload: true
+static: web/static/
+static_prefix: /static/
+login: /users/login
+layouts:
+  basic:
+    - web/components/header.html
+    - web/layout/basic.html
+  blank:
+    - web/layout/blank.html
+pages:
+  index:
+    path: /
+    layout: basic
+    components:
+      - web/views/index.html
+    metadata:
+      title: Index
+    auth: false
+    data: web/data/index.json
+  about:
+    path: /about
+    layout: basic
+    components:
+      - web/views/about.html
+    metadata:
+      title: About
+    auth: false
+    data: web/data/about.json

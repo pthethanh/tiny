@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+
+	"github.com/pthethanh/micro/status"
 )
 
 type (
@@ -30,16 +32,30 @@ func AuthInfo(f AuthInfoFunc) Option {
 
 // JSONFileDataHandler return DataHandler that read data from the given file.
 // Panics if failed to read the file.
-func JSONFileDataHandler(f string) DataHandler {
-	data := make(map[string]interface{})
-	b, err := os.ReadFile(f)
+func JSONFileDataHandler(f string, reload bool) DataHandler {
+	loadData := func() (map[string]interface{}, error) {
+		data := make(map[string]interface{})
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, status.Internal("read data from file, err: %v", err)
+		}
+		if err := json.Unmarshal(b, &data); err != nil {
+			return nil, status.Internal("invalid data, err: %v", err)
+		}
+		return data, nil
+	}
+	data, err := loadData()
 	if err != nil {
 		panic(err)
 	}
-	if err := json.Unmarshal(b, &data); err != nil {
-		panic(err)
-	}
 	return func(rw http.ResponseWriter, r *http.Request) interface{} {
+		if !reload {
+			return data
+		}
+		data, err := loadData()
+		if err != nil {
+			return err
+		}
 		return data
 	}
 }

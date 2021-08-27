@@ -161,7 +161,7 @@ func NewSite(path string, options ...Option) *Site {
 	// set data handler from JSON file if defined.
 	for n, p := range site.Pages {
 		if p.Data != "" {
-			site.SetDataHandler(n, JSONFileDataHandler(p.Data))
+			site.SetDataHandler(n, JSONFileDataHandler(p.Data, site.Reload))
 		}
 	}
 	return &site
