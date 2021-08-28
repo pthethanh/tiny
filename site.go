@@ -163,8 +163,6 @@ func NewSite(path string, options ...Option) *Site {
 		log.Panic(err)
 	}
 	site := Site{
-		Static:       "web/dist/static/",
-		StaticPrefix: "/static/",
 		MetaData: MetaData{
 			Lang:        "en",
 			Author:      "tiny",
