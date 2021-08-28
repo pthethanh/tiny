@@ -3,6 +3,7 @@ package tiny
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -10,7 +11,6 @@ import (
 	"path"
 	"sync"
 	"time"
-
 	"log"
 
 	"github.com/gorilla/mux"
@@ -195,7 +195,7 @@ func NewSite(path string, options ...Option) *Site {
 	// set data handler from JSON file if defined.
 	for n, p := range site.Pages {
 		if p.Data != "" {
-			site.SetDataHandler(n, JSONFileDataHandler(p.Data, site.Reload))
+			site.SetDataHandler(n, site.jsonFileDataHandler(n, p.Data))
 		}
 	}
 	return &site
@@ -489,4 +489,47 @@ func (page PageData) GetCookie(k string) string {
 		return ck.Value
 	}
 	return ""
+}
+
+// jsonFileDataHandler return DataHandler that read data from the given json file.
+// Data can be accessed via [[.Data]] in templates.
+// Panics if failed to read the file.
+func (site *Site) jsonFileDataHandler(p string, f string) DataHandler {
+	loadData := func() (map[string]interface{}, error) {
+		data := make(map[string]interface{})
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, Error(http.StatusInternalServerError, "read data from file, err: %v", err)
+		}
+		if err := json.Unmarshal(b, &data); err != nil {
+			return nil, Error(http.StatusInternalServerError, "invalid data, err: %v", err)
+		}
+		return data, nil
+	}
+	data, err := loadData()
+	if err != nil {
+		panic(err)
+	}
+	return func(rw http.ResponseWriter, r *http.Request) interface{} {
+		if !site.Reload {
+			return struct {
+				PageData
+				Data map[string]interface{}
+			}{
+				PageData: site.GetPageData(p, r),
+				Data:     data,
+			}
+		}
+		data, err := loadData()
+		if err != nil {
+			return err
+		}
+		return struct {
+			PageData
+			Data map[string]interface{}
+		}{
+			PageData: site.GetPageData(p, r),
+			Data:     data,
+		}
+	}
 }
