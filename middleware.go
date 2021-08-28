@@ -10,7 +10,6 @@ const (
 )
 
 // Cache cache static resources.
-// If maxAge = 0, maxAge will be retrieved from HTTP_CACHE_MAX_AGE.
 func Cache(maxAge int64) func(http.Handler) http.Handler {
 	if maxAge == 0 {
 		maxAge = defaultMaxAge
@@ -24,6 +23,7 @@ func Cache(maxAge int64) func(http.Handler) http.Handler {
 	}
 }
 
+// AuthRequired provides middleware for redirecting user to login page if they have not logged in yet.
 func AuthRequired(loginPath string, authInfoFunc AuthInfoFunc) func(http.Handler) http.Handler {
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {

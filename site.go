@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"os"
 	"path"
 	"sync"
 	"time"
-	"log"
 
 	"github.com/gorilla/mux"
 	"github.com/pthethanh/tiny/funcs"
@@ -45,6 +45,7 @@ type (
 		Layouts      map[string][]string `yaml:"layouts"`
 		Pages        map[string]Page     `yaml:"pages"`
 		Errors       map[uint32]string   `yaml:"errors"`
+		Validate     bool                `yaml:"validate"`
 
 		once      sync.Once
 		router    *mux.Router
@@ -54,8 +55,8 @@ type (
 		authInfo  AuthInfoFunc
 	}
 
-	// UserClaims represents the claims provided by the JWT.
-	UserClaims struct {
+	// Claims represents the claims provided by the JWT.
+	Claims struct {
 		// Auth claims
 		Audience  string `json:"aud,omitempty"`
 		ExpiresAt int64  `json:"exp,omitempty"`
@@ -108,7 +109,7 @@ type (
 	PageData struct {
 		MetaData      MetaData
 		Authenticated bool
-		User          UserClaims
+		User          Claims
 		Error         error
 		Cookies       map[string]*http.Cookie
 	}
@@ -151,7 +152,7 @@ type (
 	DataHandler          = func(rw http.ResponseWriter, r *http.Request) interface{}
 	SiteMapDataHandler   = func(rw http.ResponseWriter, r *http.Request) SiteMap
 	RobotsTXTDataHandler = func(rw http.ResponseWriter, r *http.Request) RobotsTXT
-	AuthInfoFunc         = func(context.Context) (UserClaims, bool)
+	AuthInfoFunc         = func(context.Context) (Claims, bool)
 )
 
 // NewSite read site definition from yaml config file.
@@ -176,12 +177,13 @@ func NewSite(path string, options ...Option) *Site {
 			Version:     "v0.0.1",
 		},
 		Pages: map[string]Page{},
-		mu:    sync.RWMutex{},
 		Errors: map[uint32]string{
 			http.StatusNotFound: PageNotFound,
 		},
+		mu:        sync.RWMutex{},
 		funcs:     funcs.FuncMap(),
 		templates: make(map[string]*template.Template),
+		Validate:  true,
 	}
 	if err := yaml.Unmarshal(b, &site); err != nil {
 		log.Panic(err)
@@ -198,12 +200,22 @@ func NewSite(path string, options ...Option) *Site {
 			site.SetDataHandler(n, site.jsonFileDataHandler(n, p.Data))
 		}
 	}
+	// validate config file.
+	if !site.Validate {
+		log.Printf("warn: config validation is disabled.")
+	}
+	if err := site.validateSite(); err != nil {
+		if site.Validate {
+			log.Panic(err)
+		}
+		log.Printf("warn: invalid config file: %v\n", err)
+	}
 	return &site
 }
 
 // GetPageData get common data from configuration and request.
 func (site *Site) GetPageData(pageName string, r *http.Request, errs ...error) PageData {
-	claims := UserClaims{}
+	claims := Claims{}
 	authenticated := false
 	if site.authInfo != nil {
 		claims, authenticated = site.authInfo(r.Context())
@@ -238,7 +250,7 @@ func (site *Site) ServePage(name string) http.Handler {
 			return
 		}
 		if err := site.handlePage(rw, r, name, data); err != nil {
-			log.Printf("template:%s, err: %v\n", name, err)
+			log.Printf("error: template:%s, err: %v\n", name, err)
 			site.handleError(rw, r, err)
 			return
 		}
@@ -255,7 +267,7 @@ func (site *Site) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		router := mux.NewRouter()
 		router.PathPrefix(site.StaticPrefix).Handler(site.ServeStatic(site.StaticPrefix))
 		for name, p := range site.Pages {
-			log.Printf("register page: %s, path: %s, method: %s\n", name, p.Path, http.MethodGet)
+			log.Printf("info: register page: %s, path: %s, method: %s\n", name, p.Path, http.MethodGet)
 			h := site.ServePage(name)
 			if p.Auth {
 				h = AuthRequired(site.Login, site.authInfo)(h)
@@ -400,12 +412,12 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	}
 	tpl, err := template.New(tplName).Delims("[[", "]]").Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
 	if err != nil {
-		log.Printf("template: parse common template, err: %v\n", err)
+		log.Printf("error: parse common template, err: %v\n", err)
 		return nil, err
 	}
 	tpl, err = tpl.ParseFiles(files...)
 	if err != nil {
-		log.Printf("template: parse template, err: %v\n", err)
+		log.Printf("error: parse template, err: %v\n", err)
 		return nil, err
 	}
 	site.templates[name] = tpl
@@ -418,7 +430,7 @@ func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error
 		name = t
 	}
 	if err := site.handlePage(rw, r, name, site.GetPageData(name, r, err)); err != nil {
-		log.Printf("template: serve error page, err: %v\n", err)
+		log.Printf("error: serve error page, err: %v\n", err)
 		http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
 }
@@ -426,7 +438,7 @@ func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error
 func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string, data interface{}) error {
 	t, err := site.parseTemplate(name)
 	if err != nil {
-		log.Printf("template:%s parse failed, err: %v\n", name, err)
+		log.Printf("error: %s parse failed, err: %v\n", name, err)
 		return err
 	}
 	if data == nil {
@@ -532,4 +544,38 @@ func (site *Site) jsonFileDataHandler(p string, f string) DataHandler {
 			Data:     data,
 		}
 	}
+}
+
+func (site *Site) validateSite() error {
+	if site.Static != "" {
+		if _, err := os.Stat(site.Static); err != nil {
+			return fmt.Errorf("static path: %s, err: %w", site.Static, err)
+		}
+	}
+	for l, comps := range site.Layouts {
+		for _, c := range comps {
+			if _, err := os.Stat(c); err != nil {
+				return fmt.Errorf("layout: %s, component: %s, err: %w", l, c, err)
+			}
+		}
+	}
+	auth := false
+	// validate if configured files exists
+	for n, p := range site.Pages {
+		// check if layout exists
+		if _, ok := site.Layouts[p.Layout]; !ok && p.Layout != "" {
+			return fmt.Errorf("page:%s, layout: %s not found", n, p.Layout)
+		}
+		// check if component exists
+		for _, c := range p.Components {
+			if _, err := os.Stat(c); err != nil {
+				return fmt.Errorf("page: %s, component: %s, err: %w", n, c, err)
+			}
+		}
+		auth = auth || p.Auth
+	}
+	if auth && site.authInfo == nil {
+		return fmt.Errorf("auth is enabled but no auth info func is provided")
+	}
+	return nil
 }
