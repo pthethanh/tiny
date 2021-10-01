@@ -1,4 +1,4 @@
-[[- range .UserAgents -]]
+[[- range .Data.UserAgents -]]
 User-agent: [[.UserAgent|default "*"]]
 [[- if .Disallow]]
     [[- range .Disallow]]

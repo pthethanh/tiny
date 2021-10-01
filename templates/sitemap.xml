@@ -1,5 +1,5 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  [[- range .URLSet]]
+  [[- range .Data.URLSet]]
   <url>
     <loc>[[printf "%s%s" ($.MetaData.BaseURL|default "http://localhost:8000") .Loc]]</loc>
     <lastmod>[[(.LastMod|date "2006-01-02T15:04:05Z07:00" "Local")|safe_html]]</lastmod>

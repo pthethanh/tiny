@@ -112,6 +112,9 @@ type (
 		User          Claims
 		Error         error
 		Cookies       map[string]*http.Cookie
+
+		// additional data return from DataHandler.
+		Data interface{}
 	}
 
 	// MetaData hold metadata of a page.
@@ -136,7 +139,6 @@ type (
 		Priority   float64
 	}
 	SiteMap struct {
-		PageData
 		URLSet []SiteMapURL
 	}
 
@@ -237,13 +239,11 @@ func (site *Site) GetPageData(pageName string, r *http.Request, errs ...error) P
 
 func (site *Site) ServePage(name string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		var data interface{}
+		data := site.GetPageData(name, r, nil)
 		if p, ok := site.Pages[name]; ok && p.DataHandler != nil {
-			data = p.DataHandler(rw, r)
-		} else {
-			data = site.GetPageData(name, r, nil)
+			data.Data = p.DataHandler(rw, r)
 		}
-		if err, ok := data.(error); ok {
+		if err, ok := data.Data.(error); ok {
 			site.handleError(rw, r, err)
 			return
 		}
@@ -464,7 +464,6 @@ func (site *Site) addDefaultSiteMap() {
 		Path: "/sitemap.xml",
 		DataHandler: func(rw http.ResponseWriter, r *http.Request) interface{} {
 			return SiteMap{
-				PageData: site.GetPageData(PageSitemapXML, r),
 				URLSet: []SiteMapURL{
 					{
 						Loc:        "/",
@@ -522,25 +521,13 @@ func (site *Site) jsonFileDataHandler(p string, f string) DataHandler {
 	}
 	return func(rw http.ResponseWriter, r *http.Request) interface{} {
 		if !site.Reload {
-			return struct {
-				PageData
-				Data map[string]interface{}
-			}{
-				PageData: site.GetPageData(p, r),
-				Data:     data,
-			}
+			return data
 		}
 		data, err := loadData()
 		if err != nil {
 			return err
 		}
-		return struct {
-			PageData
-			Data map[string]interface{}
-		}{
-			PageData: site.GetPageData(p, r),
-			Data:     data,
-		}
+		return data
 	}
 }
 
