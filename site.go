@@ -151,6 +151,9 @@ type (
 		UserAgents []UserAgent
 	}
 
+	// DataHandler is a custom handler for providing data to be used in page templates.
+	// The return data can be used in template via `.Data` property of PageData.
+	// If the return data is a PageData, the default PageData will be overridden.
 	DataHandler          = func(rw http.ResponseWriter, r *http.Request) interface{}
 	SiteMapDataHandler   = func(rw http.ResponseWriter, r *http.Request) SiteMap
 	RobotsTXTDataHandler = func(rw http.ResponseWriter, r *http.Request) RobotsTXT
@@ -241,7 +244,12 @@ func (site *Site) ServePage(name string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		data := site.GetPageData(name, r, nil)
 		if p, ok := site.Pages[name]; ok && p.DataHandler != nil {
-			data.Data = p.DataHandler(rw, r)
+			d := p.DataHandler(rw, r)
+			if pd, ok := d.(PageData); ok {
+				data = pd
+			} else {
+				data.Data = d
+			}
 		}
 		if err, ok := data.Data.(error); ok {
 			site.handleError(rw, r, err)
