@@ -29,12 +29,15 @@ const (
 	PageError      = "error"
 	PageRobotsTxt  = "robots.txt"
 	PageSitemapXML = "sitemap.xml"
+
+	DefaultDelimeLeft  = "[["
+	DefaultDelimeRight = "]]"
 )
 
 type (
 	// Site hold site template config/definitions
 	// this is just for quickly create a small site like blog.
-	// Note that templates must use tag [[.]] instead of {{.}}
+	// Note that templates use tag [[ ]] by default.
 	Site struct {
 		CacheMaxAge  time.Duration       `yaml:"cache_max_age"`
 		MetaData     MetaData            `yaml:"metadata"`
@@ -46,6 +49,8 @@ type (
 		Pages        map[string]Page     `yaml:"pages"`
 		Errors       map[uint32]string   `yaml:"errors"`
 		Validate     bool                `yaml:"validate"`
+		DelimLeft    string              `yaml:"delim_left"`
+		DelimRight   string              `yaml:"delim_right"`
 
 		once      sync.Once
 		router    *mux.Router
@@ -79,8 +84,8 @@ type (
 		Email               string `json:"email,omitempty"`
 		EmailVerified       bool   `json:"email_verified,omitempty"`
 		Gender              string `json:"gender,omitempty"`
-		Birthdate           string `json:"birthdate,omitempty"`
-		Zoneinfo            string `json:"zoneinfo,omitempty"`
+		BirthDate           string `json:"birthdate,omitempty"`
+		ZoneInfo            string `json:"zoneinfo,omitempty"`
 		Locale              string `json:"locale,omitempty"`
 		PhoneNumber         string `json:"phone_number,omitempty"`
 		PhoneNumberVerified bool   `json:"phone_number_verified,omitempty"`
@@ -93,7 +98,7 @@ type (
 		Metadata map[string]interface{} `json:"metadata,omitempty"`
 	}
 
-	// Page prepresent a web page.
+	// Page represent a web page.
 	Page struct {
 		Path        string   `yaml:"path"`
 		Layout      string   `yaml:"layout"`
@@ -101,6 +106,8 @@ type (
 		MetaData    MetaData `yaml:"metadata"`
 		Auth        bool     `yaml:"auth"`
 		Data        string   `yaml:"data"`
+		DelimLeft   string   `yaml:"delim_left"`
+		DelimRight  string   `yaml:"delim_right"`
 		DataHandler DataHandler
 
 		embed bool
@@ -183,10 +190,12 @@ func NewSite(path string, options ...Option) *Site {
 		Errors: map[uint32]string{
 			http.StatusNotFound: PageNotFound,
 		},
-		mu:        sync.RWMutex{},
-		funcs:     funcs.FuncMap(),
-		templates: make(map[string]*template.Template),
-		Validate:  true,
+		mu:         sync.RWMutex{},
+		funcs:      funcs.FuncMap(),
+		templates:  make(map[string]*template.Template),
+		Validate:   true,
+		DelimLeft:  DefaultDelimeLeft,
+		DelimRight: DefaultDelimeRight,
 	}
 	if err := yaml.Unmarshal(b, &site); err != nil {
 		log.Panic(err)
@@ -200,7 +209,7 @@ func NewSite(path string, options ...Option) *Site {
 	// set data handler from JSON file if defined.
 	for n, p := range site.Pages {
 		if p.Data != "" {
-			site.SetDataHandler(n, site.jsonFileDataHandler(n, p.Data))
+			site.SetDataHandler(n, site.jsonFileDataHandler(p.Data))
 		}
 	}
 	// validate config file.
@@ -388,7 +397,6 @@ func (site *Site) getPageMetaData(name string) MetaData {
 }
 
 // parseTemplate parse the template base on the given config name.
-// use [[]] for delimiter tag.
 func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	tpl, loaded := site.templates[name]
 	// if it's embed template, no need  to parse again.
@@ -416,12 +424,18 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	if path.Ext(tplName) == "" {
 		tplName = fmt.Sprintf("%s.html", tplName)
 	}
-	tpl, err := template.New(tplName).Delims("[[", "]]").Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
+	// load predefined template with default delims.
+	tpl, err := template.New(tplName).Delims(DefaultDelimeLeft, DefaultDelimeRight).Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
 	if err != nil {
 		log.Printf("error: parse common template, err: %v\n", err)
 		return nil, err
 	}
-	tpl, err = tpl.ParseFiles(files...)
+	// delims can be overridden page by page.
+	delimLeft, delimRight := page.DelimLeft, page.DelimRight
+	if delimLeft == "" || delimRight == "" {
+		delimLeft, delimRight = site.DelimLeft, site.DelimRight
+	}
+	tpl, err = tpl.Delims(delimLeft, delimRight).ParseFiles(files...)
 	if err != nil {
 		log.Printf("error: parse template, err: %v\n", err)
 		return nil, err
@@ -456,8 +470,10 @@ func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string
 	return nil
 }
 
+// addEmbedPage add default pages, ready to use.
+// Notes that default pages should use default delims [[]]
 func (site *Site) addEmbedPage(name string, fs embed.FS, pattern string, p Page) {
-	t, err := template.New(path.Base(pattern)).Delims("[[", "]]").Funcs(site.funcs).ParseFS(fs, pattern)
+	t, err := template.New(path.Base(pattern)).Delims(DefaultDelimeLeft, DefaultDelimeRight).Funcs(site.funcs).ParseFS(fs, pattern)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -509,9 +525,9 @@ func (page PageData) GetCookie(k string) string {
 }
 
 // jsonFileDataHandler return DataHandler that read data from the given json file.
-// Data can be accessed via [[.Data]] in templates.
+// Data can be accessed via .Data in templates.
 // Panics if failed to read the file.
-func (site *Site) jsonFileDataHandler(p string, f string) DataHandler {
+func (site *Site) jsonFileDataHandler(f string) DataHandler {
 	loadData := func() (map[string]interface{}, error) {
 		data := make(map[string]interface{})
 		b, err := os.ReadFile(f)

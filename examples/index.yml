@@ -17,6 +17,8 @@ reload: true
 static: web/static/
 static_prefix: /static/
 login: /users/login
+#delim_left: "{{"
+#delim_right: "}}"
 layouts:
   basic:
     - web/components/header.html
