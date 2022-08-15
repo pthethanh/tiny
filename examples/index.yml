@@ -13,6 +13,7 @@ metadata:
   type: Website
   image: /static/images/header.jpg
   description: tiny - ideas worth sharing.
+  something: haha this is something.
 reload: true
 static: web/static/
 static_prefix: /static/
@@ -34,7 +35,8 @@ pages:
     metadata:
       title: Index
     auth: false
-    data: web/data/index.json
+    # data from json file
+    data: json://web/data/index.json
   about:
     path: /about
     layout: basic
@@ -43,7 +45,9 @@ pages:
     metadata:
       title: About
     auth: false
-    data: web/data/about.json
+    # declare data as a map directly
+    data:
+      about: "Hello, this blog is served by https://github.com/pthethanh/tiny"
 errors:
   404: not_found
   500: error

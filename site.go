@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ const (
 	PageError      = "error"
 	PageRobotsTxt  = "robots.txt"
 	PageSitemapXML = "sitemap.xml"
+	jsonPrefix     = "json://"
 
 	DefaultDelimeLeft  = "[["
 	DefaultDelimeRight = "]]"
@@ -60,84 +62,30 @@ type (
 		authInfo  AuthInfoFunc
 	}
 
-	// Claims represents the claims provided by the JWT.
-	Claims struct {
-		// Auth claims
-		Audience  string `json:"aud,omitempty"`
-		ExpiresAt int64  `json:"exp,omitempty"`
-		ID        string `json:"jti,omitempty"`
-		IssuedAt  int64  `json:"iat,omitempty"`
-		Issuer    string `json:"iss,omitempty"`
-		NotBefore int64  `json:"nbf,omitempty"`
-		Subject   string `json:"sub,omitempty"`
-
-		// User attributes claims
-		Name                string `json:"name,omitempty"`
-		GivenName           string `json:"given_name,omitempty"`
-		FamilyName          string `json:"family_name,omitempty"`
-		MiddleName          string `json:"middle_name,omitempty"`
-		Nickname            string `json:"nickname,omitempty"`
-		PreferredUsername   string `json:"preferred_username,omitempty"`
-		Profile             string `json:"profile,omitempty"`
-		Picture             string `json:"picture,omitempty"`
-		Website             string `json:"website,omitempty"`
-		Email               string `json:"email,omitempty"`
-		EmailVerified       bool   `json:"email_verified,omitempty"`
-		Gender              string `json:"gender,omitempty"`
-		BirthDate           string `json:"birthdate,omitempty"`
-		ZoneInfo            string `json:"zoneinfo,omitempty"`
-		Locale              string `json:"locale,omitempty"`
-		PhoneNumber         string `json:"phone_number,omitempty"`
-		PhoneNumberVerified bool   `json:"phone_number_verified,omitempty"`
-		Address             string `json:"address,omitempty"`
-		UpdatedAt           int64  `json:"updated_at,omitempty"`
-
-		// Custom attributes claims.
-		Scope    string                 `json:"scope,omitempty"`
-		Admin    bool                   `json:"admin,omitempty"`
-		Metadata map[string]interface{} `json:"metadata,omitempty"`
-	}
-
 	// Page represent a web page.
 	Page struct {
-		Path        string   `yaml:"path"`
-		Layout      string   `yaml:"layout"`
-		Components  []string `yaml:"components"`
-		MetaData    MetaData `yaml:"metadata"`
-		Auth        bool     `yaml:"auth"`
-		Data        string   `yaml:"data"`
-		DelimLeft   string   `yaml:"delim_left"`
-		DelimRight  string   `yaml:"delim_right"`
-		DataHandler DataHandler
+		Path        string      `yaml:"path"`
+		Layout      string      `yaml:"layout"`
+		Components  []string    `yaml:"components"`
+		MetaData    MetaData    `yaml:"metadata"`
+		Auth        bool        `yaml:"auth"`
+		Data        interface{} `yaml:"data"`
+		DelimLeft   string      `yaml:"delim_left"`
+		DelimRight  string      `yaml:"delim_right"`
+		DataHandler DataHandler `yaml:"data_handler"`
 
 		embed bool
 	}
 	// PageData hold basic data of a web page.
 	PageData struct {
-		MetaData      MetaData
-		Authenticated bool
-		User          Claims
-		Error         error
-		Cookies       map[string]*http.Cookie
+		MetaData      MetaData                `yaml:"metadata"`
+		Authenticated bool                    `yaml:"authenticated"`
+		User          interface{}             `yaml:"user"`
+		Error         error                   `yaml:"error"`
+		Cookies       map[string]*http.Cookie `yaml:"cookies"`
 
 		// additional data return from DataHandler.
-		Data interface{}
-	}
-
-	// MetaData hold metadata of a page.
-	MetaData struct {
-		Version      string   `yaml:"version"`
-		Lang         string   `yaml:"lang"`
-		SiteName     string   `yaml:"site_name"`
-		Title        string   `yaml:"title"`
-		Domain       string   `yaml:"domain"`
-		BaseURL      string   `yaml:"base_url"`
-		CanonicalURL string   `yaml:"canonical_url"`
-		KeyWords     []string `yaml:"key_words"`
-		Author       string   `yaml:"author"`
-		Type         string   `yaml:"type"`
-		Image        string   `yaml:"image"`
-		Description  string   `yaml:"description"`
+		Data interface{} `yaml:"data"`
 	}
 	SiteMapURL struct {
 		Loc        string
@@ -164,7 +112,7 @@ type (
 	DataHandler          = func(rw http.ResponseWriter, r *http.Request) interface{}
 	SiteMapDataHandler   = func(rw http.ResponseWriter, r *http.Request) SiteMap
 	RobotsTXTDataHandler = func(rw http.ResponseWriter, r *http.Request) RobotsTXT
-	AuthInfoFunc         = func(context.Context) (Claims, bool)
+	AuthInfoFunc         = func(context.Context) (interface{}, bool)
 )
 
 // NewSite read site definition from yaml config file.
@@ -175,16 +123,19 @@ func NewSite(path string, options ...Option) *Site {
 		log.Panic(err)
 	}
 	site := Site{
-		MetaData: MetaData{
-			Lang:        "en",
-			Author:      "tiny",
-			Description: "Tiny",
-			Domain:      "localhost",
-			KeyWords:    []string{"tiny"},
-			Title:       "Tiny",
-			Type:        "WebSite",
-			SiteName:    "Tiny",
-			Version:     "v0.0.1",
+		MetaData: map[string]interface{}{
+			"lang":          "en",
+			"author":        "tiny",
+			"description":   "Tiny",
+			"domain":        "localhost",
+			"key_words":     []string{"tiny"},
+			"title":         "Tiny",
+			"type":          "WebSite",
+			"site_name":     "Tiny",
+			"version":       "v0.0.1",
+			"image":         "",
+			"base_url":      "",
+			"canonical_url": "",
 		},
 		Pages: map[string]Page{},
 		Errors: map[uint32]string{
@@ -208,8 +159,20 @@ func NewSite(path string, options ...Option) *Site {
 	site.addDefaultPagesIfNotExists()
 	// set data handler from JSON file if defined.
 	for n, p := range site.Pages {
-		if p.Data != "" {
-			site.SetDataHandler(n, site.jsonFileDataHandler(p.Data))
+		n := n
+		p := p
+		if p.Data != nil {
+			// load as json if it's compliant to the json prefix
+			if f, ok := p.Data.(string); ok && strings.HasPrefix(f, jsonPrefix) {
+				f := f[len(jsonPrefix):]
+				site.SetDataHandler(n, site.jsonFileDataHandler(f))
+			} else {
+				// set it as raw data
+				site.SetDataHandler(n, func(rw http.ResponseWriter, r *http.Request) interface{} {
+					return p.Data
+				})
+			}
+
 		}
 	}
 	// validate config file.
@@ -227,7 +190,7 @@ func NewSite(path string, options ...Option) *Site {
 
 // GetPageData get common data from configuration and request.
 func (site *Site) GetPageData(pageName string, r *http.Request, errs ...error) PageData {
-	claims := Claims{}
+	var claims interface{}
 	authenticated := false
 	if site.authInfo != nil {
 		claims, authenticated = site.authInfo(r.Context())
@@ -348,52 +311,21 @@ func (site *Site) addDefaultPagesIfNotExists() {
 }
 
 // getPageMetaData get metadata from config.
-func (site *Site) getPageMetaData(name string) MetaData {
+func (site *Site) getPageMetaData(name string) map[string]interface{} {
 	page, ok := site.Pages[name]
 	if !ok {
 		return site.MetaData
 	}
-	meta := page.MetaData
-	// general information should not be overridden
-	meta.Domain = site.MetaData.Domain
-	meta.SiteName = site.MetaData.SiteName
-	meta.BaseURL = site.MetaData.BaseURL
-
-	// specific info can be overridden.
-	if meta.Image == "" {
-		meta.Image = site.MetaData.Image
+	if page.MetaData == nil {
+		page.MetaData = make(map[string]interface{})
 	}
-	if meta.Title == "" {
-		meta.Title = site.MetaData.Title
+	// get value from site if page doesn't defined.
+	for k, v := range site.MetaData {
+		if _, ok := page.MetaData[k]; !ok {
+			page.MetaData[k] = v
+		}
 	}
-	if meta.Author == "" {
-		meta.Author = site.MetaData.Author
-	}
-	if len(meta.KeyWords) == 0 {
-		meta.KeyWords = append(meta.KeyWords, site.MetaData.KeyWords...)
-	}
-	if meta.Description == "" {
-		meta.Description = site.MetaData.Description
-	}
-	if meta.Lang == "" {
-		meta.Lang = site.MetaData.Lang
-	}
-	if meta.CanonicalURL == "" {
-		meta.CanonicalURL = site.MetaData.CanonicalURL
-	}
-	if meta.Author == "" {
-		meta.Author = site.MetaData.Author
-	}
-	if meta.Type == "" {
-		meta.Type = site.MetaData.Type
-	}
-	if meta.Image == "" {
-		meta.Image = site.MetaData.Image
-	}
-	if meta.Version == "" {
-		meta.Version = site.MetaData.Version
-	}
-	return meta
+	return page.MetaData
 }
 
 // parseTemplate parse the template base on the given config name.
@@ -478,7 +410,6 @@ func (site *Site) addEmbedPage(name string, fs embed.FS, pattern string, p Page)
 		log.Panic(err)
 	}
 	p.embed = true
-
 	site.templates[name] = t
 	site.Pages[name] = p
 }
