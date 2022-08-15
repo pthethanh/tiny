@@ -72,3 +72,51 @@ func (m MetaData) Image() string {
 func (m MetaData) Description() string {
 	return m.GetStr("description")
 }
+
+func (m MetaData) SetVersion(v string) {
+	m["version"] = v
+}
+
+func (m MetaData) SetLang(v string) {
+	m["lang"] = v
+}
+
+func (m MetaData) SetSiteName(v string) {
+	m["site_name"] = v
+}
+
+func (m MetaData) SetTitle(v string) {
+	m["title"] = v
+}
+
+func (m MetaData) SetDomain(v string) {
+	m["domain"] = v
+}
+
+func (m MetaData) SetBaseURL(v string) {
+	m["base_url"] = v
+}
+
+func (m MetaData) SetCanonicalURL(v string) {
+	m["canonical_url"] = v
+}
+
+func (m MetaData) SetKeyWords(v ...string) {
+	m["key_words"] = v
+}
+
+func (m MetaData) SetAuthor(v string) {
+	m["author"] = v
+}
+
+func (m MetaData) SetType(v string) {
+	m["type"] = v
+}
+
+func (m MetaData) SetImage(v string) {
+	m["image"] = v
+}
+
+func (m MetaData) SetDescription(v string) {
+	m["description"] = v
+}
