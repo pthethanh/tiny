@@ -32,8 +32,8 @@ const (
 	PageSitemapXML = "sitemap.xml"
 	jsonPrefix     = "json://"
 
-	DefaultDelimeLeft  = "[["
-	DefaultDelimeRight = "]]"
+	DefaultDelimLeft  = "[["
+	DefaultDelimRight = "]]"
 )
 
 type (
@@ -49,7 +49,7 @@ type (
 		Login        string              `yaml:"login"`
 		Layouts      map[string][]string `yaml:"layouts"`
 		Pages        map[string]Page     `yaml:"pages"`
-		Errors       map[uint32]string   `yaml:"errors"`
+		Errors       map[string][]int    `yaml:"errors"`
 		Validate     bool                `yaml:"validate"`
 		DelimLeft    string              `yaml:"delim_left"`
 		DelimRight   string              `yaml:"delim_right"`
@@ -60,6 +60,7 @@ type (
 		mu        sync.RWMutex
 		funcs     map[string]interface{}
 		authInfo  AuthInfoFunc
+		errors    map[int]string
 	}
 
 	// Page represent a web page.
@@ -69,23 +70,23 @@ type (
 		Components  []string    `yaml:"components"`
 		MetaData    MetaData    `yaml:"metadata"`
 		Auth        bool        `yaml:"auth"`
-		Data        interface{} `yaml:"data"`
 		DelimLeft   string      `yaml:"delim_left"`
 		DelimRight  string      `yaml:"delim_right"`
-		DataHandler DataHandler `yaml:"data_handler"`
+		Data        interface{} `yaml:"data"`
+		DataHandler DataHandler `yaml:"-"`
 
 		embed bool
 	}
 	// PageData hold basic data of a web page.
 	PageData struct {
-		MetaData      MetaData                `yaml:"metadata"`
-		Authenticated bool                    `yaml:"authenticated"`
-		User          interface{}             `yaml:"user"`
-		Error         error                   `yaml:"error"`
-		Cookies       map[string]*http.Cookie `yaml:"cookies"`
+		MetaData      MetaData
+		Authenticated bool
+		User          interface{}
+		Error         error
+		Cookies       map[string]*http.Cookie
 
 		// additional data return from DataHandler.
-		Data interface{} `yaml:"data"`
+		Data interface{}
 	}
 	SiteMapURL struct {
 		Loc        string
@@ -138,15 +139,17 @@ func NewSite(path string, options ...Option) *Site {
 			"canonical_url": "",
 		},
 		Pages: map[string]Page{},
-		Errors: map[uint32]string{
-			http.StatusNotFound: PageNotFound,
+		Errors: map[string][]int{
+			PageNotFound: {http.StatusNotFound},
+			PageError:    {http.StatusInternalServerError},
 		},
+		errors:     make(map[int]string),
 		mu:         sync.RWMutex{},
 		funcs:      funcs.FuncMap(),
 		templates:  make(map[string]*template.Template),
 		Validate:   true,
-		DelimLeft:  DefaultDelimeLeft,
-		DelimRight: DefaultDelimeRight,
+		DelimLeft:  DefaultDelimLeft,
+		DelimRight: DefaultDelimRight,
 	}
 	if err := yaml.Unmarshal(b, &site); err != nil {
 		log.Panic(err)
@@ -175,10 +178,13 @@ func NewSite(path string, options ...Option) *Site {
 
 		}
 	}
-	// validate config file.
-	if !site.Validate {
-		log.Printf("warn: config validation is disabled.")
+	// re-mapping error handlers
+	for p, errs := range site.Errors {
+		for _, err := range errs {
+			site.errors[err] = p
+		}
 	}
+	// validate site data
 	if err := site.validateSite(); err != nil {
 		if site.Validate {
 			log.Panic(err)
@@ -189,15 +195,11 @@ func NewSite(path string, options ...Option) *Site {
 }
 
 // GetPageData get common data from configuration and request.
-func (site *Site) GetPageData(pageName string, r *http.Request, errs ...error) PageData {
+func (site *Site) GetPageData(pageName string, r *http.Request, err error) PageData {
 	var claims interface{}
 	authenticated := false
 	if site.authInfo != nil {
 		claims, authenticated = site.authInfo(r.Context())
-	}
-	var err error
-	if len(errs) > 0 {
-		err = errs[0]
 	}
 	data := PageData{
 		MetaData:      site.getPageMetaData(pageName),
@@ -272,7 +274,7 @@ func (site *Site) SetDataHandler(name string, h DataHandler) error {
 	defer site.mu.Unlock()
 	p, ok := site.Pages[name]
 	if !ok {
-		return Error(http.StatusNotFound, "page not found")
+		return NewError(http.StatusNotFound, "page not found")
 	}
 	p.DataHandler = h
 	site.Pages[name] = p
@@ -311,13 +313,13 @@ func (site *Site) addDefaultPagesIfNotExists() {
 }
 
 // getPageMetaData get metadata from config.
-func (site *Site) getPageMetaData(name string) map[string]interface{} {
+func (site *Site) getPageMetaData(name string) MetaData {
 	page, ok := site.Pages[name]
 	if !ok {
 		return site.MetaData
 	}
 	if page.MetaData == nil {
-		page.MetaData = make(map[string]interface{})
+		page.MetaData = make(MetaData)
 	}
 	// get value from site if page doesn't defined.
 	for k, v := range site.MetaData {
@@ -342,12 +344,12 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	// parse the template.
 	page, ok := site.Pages[name]
 	if !ok {
-		return nil, Error(http.StatusNotFound, "page not found")
+		return nil, NewError(http.StatusNotFound, "page not found")
 	}
-	layout := site.Layouts[page.Layout]
-	files := append(layout, page.Components...)
+	layouts := site.Layouts[page.Layout]
+	files := append(layouts, page.Components...)
 	if len(files) == 0 {
-		return nil, Error(http.StatusNotFound, "no templates found")
+		return nil, NewError(http.StatusNotFound, "no templates found")
 	}
 	tplName := page.Layout
 	if page.Layout == "" {
@@ -357,7 +359,7 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 		tplName = fmt.Sprintf("%s.html", tplName)
 	}
 	// load predefined template with default delims.
-	tpl, err := template.New(tplName).Delims(DefaultDelimeLeft, DefaultDelimeRight).Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
+	tpl, err := template.New(tplName).Delims(DefaultDelimLeft, DefaultDelimRight).Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
 	if err != nil {
 		log.Printf("error: parse common template, err: %v\n", err)
 		return nil, err
@@ -378,7 +380,7 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 
 func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error) {
 	name := PageError
-	if t, ok := site.Errors[ErrorFromErr(err).Code()]; ok {
+	if t, ok := site.errors[ErrorFromErr(err).Code()]; ok {
 		name = t
 	}
 	if err := site.handlePage(rw, r, name, site.GetPageData(name, r, err)); err != nil {
@@ -394,7 +396,7 @@ func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string
 		return err
 	}
 	if data == nil {
-		data = site.GetPageData(name, r)
+		data = site.GetPageData(name, r, nil)
 	}
 	if err := t.Execute(w, data); err != nil {
 		return err
@@ -405,7 +407,7 @@ func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string
 // addEmbedPage add default pages, ready to use.
 // Notes that default pages should use default delims [[]]
 func (site *Site) addEmbedPage(name string, fs embed.FS, pattern string, p Page) {
-	t, err := template.New(path.Base(pattern)).Delims(DefaultDelimeLeft, DefaultDelimeRight).Funcs(site.funcs).ParseFS(fs, pattern)
+	t, err := template.New(path.Base(pattern)).Delims(DefaultDelimLeft, DefaultDelimRight).Funcs(site.funcs).ParseFS(fs, pattern)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -463,10 +465,10 @@ func (site *Site) jsonFileDataHandler(f string) DataHandler {
 		data := make(map[string]interface{})
 		b, err := os.ReadFile(f)
 		if err != nil {
-			return nil, Error(http.StatusInternalServerError, "read data from file, err: %v", err)
+			return nil, NewError(http.StatusInternalServerError, "read data from file, err: %v", err)
 		}
 		if err := json.Unmarshal(b, &data); err != nil {
-			return nil, Error(http.StatusInternalServerError, "invalid data, err: %v", err)
+			return nil, NewError(http.StatusInternalServerError, "invalid data, err: %v", err)
 		}
 		return data, nil
 	}

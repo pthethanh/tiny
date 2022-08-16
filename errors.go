@@ -6,34 +6,41 @@ import (
 )
 
 type (
-	TinyError struct {
-		code uint32
+	Error struct {
+		code int
 		err  string
 	}
 )
 
-func Error(code uint32, format string, args ...interface{}) TinyError {
-	return TinyError{
+func NewError(code int, format string, args ...interface{}) Error {
+	return Error{
 		code: code,
 		err:  fmt.Sprintf(format, args...),
 	}
 }
 
-func (err TinyError) Code() uint32 {
+func (err Error) Code() int {
 	return err.code
 }
 
-func (err TinyError) Error() string {
+func (err Error) Error() string {
 	return err.err
 }
 
-func ErrorFromErr(err error) TinyError {
-	if err, ok := err.(TinyError); ok {
+func ErrorFromErr(err error) Error {
+	if err, ok := err.(Error); ok {
 		return err
 	}
-	code := uint32(http.StatusInternalServerError)
-	if err, ok := err.(interface{ Code() uint32 }); ok {
-		code = err.Code()
+	if e, ok := err.(interface{ Code() int32 }); ok {
+		return NewError(int(e.Code()), err.Error())
+	} else if e, ok := err.(interface{ Code() uint32 }); ok {
+		return NewError(int(e.Code()), err.Error())
+	} else if e, ok := err.(interface{ Code() int64 }); ok {
+		return NewError(int(e.Code()), err.Error())
+	} else if e, ok := err.(interface{ Code() uint64 }); ok {
+		return NewError(int(e.Code()), err.Error())
+	} else if e, ok := err.(interface{ Code() uint }); ok {
+		return NewError(int(e.Code()), err.Error())
 	}
-	return Error(code, err.Error())
+	return NewError(http.StatusInternalServerError, err.Error())
 }

@@ -49,5 +49,5 @@ pages:
     data:
       about: "Hello, this blog is served by https://github.com/pthethanh/tiny"
 errors:
-  404: not_found
-  500: error
+  not_found: [404]
+  error: [400, 500]
