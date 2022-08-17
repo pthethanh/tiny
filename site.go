@@ -218,10 +218,12 @@ func (site *Site) GetPageData(pageName string, rw http.ResponseWriter, r *http.R
 // getFullPageData get common data from configuration and request.
 func (site *Site) getFullPageData(pageName string, rw http.ResponseWriter, r *http.Request) PageData {
 	data := site.GetPageData(pageName, rw, r)
-	if p, ok := site.Pages[pageName]; ok && p.DataHandler != nil {
+	p, ok := site.Pages[pageName]
+	if ok && p.DataHandler != nil {
 		d := p.DataHandler(rw, r)
 		if pd, ok := d.(PageData); ok {
-			data = pd
+			// new data takes priority.
+			data.merge(pd)
 		} else if err, ok := d.(error); ok {
 			data.Error = err
 		} else {
@@ -534,4 +536,20 @@ func (site *Site) validateSite() error {
 		return fmt.Errorf("auth is enabled but no auth info func is provided")
 	}
 	return nil
+}
+
+// mergeFrom merge the page1 data to the current page data
+func (page *PageData) merge(page1 PageData) {
+	page.Data = page1.Data
+	page.Error = page1.Error
+	for k, v := range page1.MetaData {
+		page.MetaData[k] = v
+	}
+	for k, ck := range page1.Cookies {
+		page.Cookies[k] = ck
+	}
+	if page1.User != nil {
+		page.Authenticated = page1.Authenticated
+		page.User = page1.User
+	}
 }
