@@ -195,7 +195,7 @@ func NewSite(path string, options ...Option) *Site {
 }
 
 // GetPageData get common data from configuration and request.
-func (site *Site) GetPageData(pageName string, r *http.Request, err error) PageData {
+func (site *Site) GetPageData(pageName string, rw http.ResponseWriter, r *http.Request) PageData {
 	var claims interface{}
 	authenticated := false
 	if site.authInfo != nil {
@@ -205,9 +205,23 @@ func (site *Site) GetPageData(pageName string, r *http.Request, err error) PageD
 		MetaData:      site.getPageMetaData(pageName),
 		Authenticated: authenticated,
 		User:          claims,
-		Error:         err,
+		Error:         nil,
 		Cookies:       make(map[string]*http.Cookie),
 	}
+	if p, ok := site.Pages[pageName]; ok && p.DataHandler != nil {
+		d := p.DataHandler(rw, r)
+		if pd, ok := d.(PageData); ok {
+			data = pd
+		} else if err, ok := d.(error); ok {
+			data.Error = err
+		} else {
+			data.Data = d
+		}
+	} else {
+		// in case we have predefined data.
+		data.Data = p.Data
+	}
+
 	for _, ck := range r.Cookies() {
 		data.Cookies[ck.Name] = ck
 	}
@@ -216,17 +230,9 @@ func (site *Site) GetPageData(pageName string, r *http.Request, err error) PageD
 
 func (site *Site) ServePage(name string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		data := site.GetPageData(name, r, nil)
-		if p, ok := site.Pages[name]; ok && p.DataHandler != nil {
-			d := p.DataHandler(rw, r)
-			if pd, ok := d.(PageData); ok {
-				data = pd
-			} else {
-				data.Data = d
-			}
-		}
-		if err, ok := data.Data.(error); ok {
-			site.handleError(rw, r, err)
+		data := site.GetPageData(name, rw, r)
+		if data.Error != nil {
+			site.handleError(rw, r, data.Error)
 			return
 		}
 		if err := site.handlePage(rw, r, name, data); err != nil {
@@ -383,7 +389,9 @@ func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error
 	if t, ok := site.errors[ErrorFromErr(err).Code()]; ok {
 		name = t
 	}
-	if err := site.handlePage(rw, r, name, site.GetPageData(name, r, err)); err != nil {
+	data := site.GetPageData(name, rw, r)
+	data.Error = err
+	if err := site.handlePage(rw, r, name, data); err != nil {
 		log.Printf("error: serve error page, err: %v\n", err)
 		http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
@@ -396,7 +404,7 @@ func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string
 		return err
 	}
 	if data == nil {
-		data = site.GetPageData(name, r, nil)
+		data = site.GetPageData(name, w, r)
 	}
 	if err := t.Execute(w, data); err != nil {
 		return err
