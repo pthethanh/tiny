@@ -195,6 +195,7 @@ func NewSite(path string, options ...Option) *Site {
 }
 
 // GetPageData get common data from configuration and request.
+// Note this function doesn't trigger the data handler of this page.
 func (site *Site) GetPageData(pageName string, rw http.ResponseWriter, r *http.Request) PageData {
 	var claims interface{}
 	authenticated := false
@@ -208,6 +209,15 @@ func (site *Site) GetPageData(pageName string, rw http.ResponseWriter, r *http.R
 		Error:         nil,
 		Cookies:       make(map[string]*http.Cookie),
 	}
+	for _, ck := range r.Cookies() {
+		data.Cookies[ck.Name] = ck
+	}
+	return data
+}
+
+// getFullPageData get common data from configuration and request.
+func (site *Site) getFullPageData(pageName string, rw http.ResponseWriter, r *http.Request) PageData {
+	data := site.GetPageData(pageName, rw, r)
 	if p, ok := site.Pages[pageName]; ok && p.DataHandler != nil {
 		d := p.DataHandler(rw, r)
 		if pd, ok := d.(PageData); ok {
@@ -221,16 +231,12 @@ func (site *Site) GetPageData(pageName string, rw http.ResponseWriter, r *http.R
 		// in case we have predefined data.
 		data.Data = p.Data
 	}
-
-	for _, ck := range r.Cookies() {
-		data.Cookies[ck.Name] = ck
-	}
 	return data
 }
 
 func (site *Site) ServePage(name string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		data := site.GetPageData(name, rw, r)
+		data := site.getFullPageData(name, rw, r)
 		if data.Error != nil {
 			site.handleError(rw, r, data.Error)
 			return
@@ -389,7 +395,7 @@ func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error
 	if t, ok := site.errors[ErrorFromErr(err).Code()]; ok {
 		name = t
 	}
-	data := site.GetPageData(name, rw, r)
+	data := site.getFullPageData(name, rw, r)
 	data.Error = err
 	if err := site.handlePage(rw, r, name, data); err != nil {
 		log.Printf("error: serve error page, err: %v\n", err)
@@ -404,7 +410,7 @@ func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string
 		return err
 	}
 	if data == nil {
-		data = site.GetPageData(name, w, r)
+		data = site.getFullPageData(name, w, r)
 	}
 	if err := t.Execute(w, data); err != nil {
 		return err
