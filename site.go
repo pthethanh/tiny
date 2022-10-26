@@ -477,8 +477,8 @@ func (page PageData) GetCookie(k string) string {
 // Data can be accessed via .Data in templates.
 // Panics if failed to read the file.
 func (site *Site) jsonFileDataHandler(f string) DataHandler {
-	loadData := func() (map[string]interface{}, error) {
-		data := make(map[string]interface{})
+	loadData := func() (interface{}, error) {
+		var data interface{}
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return nil, NewError(http.StatusInternalServerError, "read data from file, err: %v", err)
