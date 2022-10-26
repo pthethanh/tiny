@@ -30,7 +30,7 @@ const (
 	PageError      = "error"
 	PageRobotsTxt  = "robots.txt"
 	PageSitemapXML = "sitemap.xml"
-	jsonPrefix     = "json://"
+	filePrefix     = "file://"
 
 	DefaultDelimLeft  = "[["
 	DefaultDelimRight = "]]"
@@ -41,18 +41,16 @@ type (
 	// this is just for quickly create a small site like blog.
 	// Note that templates use tag [[ ]] by default.
 	Site struct {
-		CacheMaxAge  time.Duration       `yaml:"cache_max_age"`
-		MetaData     MetaData            `yaml:"metadata"`
-		Reload       bool                `yaml:"reload"`
-		Static       string              `yaml:"static"`
-		StaticPrefix string              `yaml:"static_prefix"`
-		Login        string              `yaml:"login"`
-		Layouts      map[string][]string `yaml:"layouts"`
-		Pages        map[string]Page     `yaml:"pages"`
-		Errors       map[string][]int    `yaml:"errors"`
-		Validate     bool                `yaml:"validate"`
-		DelimLeft    string              `yaml:"delim_left"`
-		DelimRight   string              `yaml:"delim_right"`
+		MaxAge     time.Duration       `yaml:"max_age"`
+		MetaData   MetaData            `yaml:"metadata"`
+		Reload     bool                `yaml:"reload"`
+		Login      string              `yaml:"login"`
+		Layouts    map[string][]string `yaml:"layouts"`
+		Pages      map[string]Page     `yaml:"pages"`
+		Errors     map[string][]int    `yaml:"errors"`
+		Validate   bool                `yaml:"validate"`
+		DelimLeft  string              `yaml:"delim_left"`
+		DelimRight string              `yaml:"delim_right"`
 
 		once      sync.Once
 		router    *mux.Router
@@ -65,17 +63,20 @@ type (
 
 	// Page represent a web page.
 	Page struct {
-		Path        string      `yaml:"path"`
-		Layout      string      `yaml:"layout"`
-		Components  []string    `yaml:"components"`
-		MetaData    MetaData    `yaml:"metadata"`
-		Auth        bool        `yaml:"auth"`
-		DelimLeft   string      `yaml:"delim_left"`
-		DelimRight  string      `yaml:"delim_right"`
-		Data        interface{} `yaml:"data"`
-		DataHandler DataHandler `yaml:"-"`
+		Path        string        `yaml:"path"`
+		Layout      string        `yaml:"layout"`
+		Components  []string      `yaml:"components"`
+		MetaData    MetaData      `yaml:"metadata"`
+		Auth        bool          `yaml:"auth"`
+		DelimLeft   string        `yaml:"delim_left"`
+		DelimRight  string        `yaml:"delim_right"`
+		Data        interface{}   `yaml:"data"`
+		DataType    string        `yaml:"data_type"`
+		MaxAge      time.Duration `yaml:"max_age"`
+		DataHandler DataHandler   `yaml:"-"`
 
-		embed bool
+		embed    bool
+		isStatic bool
 	}
 	// PageData hold basic data of a web page.
 	PageData struct {
@@ -150,6 +151,7 @@ func NewSite(path string, options ...Option) *Site {
 		Validate:   true,
 		DelimLeft:  DefaultDelimLeft,
 		DelimRight: DefaultDelimRight,
+		MaxAge:     30 * 24 * time.Hour,
 	}
 	if err := yaml.Unmarshal(b, &site); err != nil {
 		log.Panic(err)
@@ -164,18 +166,32 @@ func NewSite(path string, options ...Option) *Site {
 	for n, p := range site.Pages {
 		n := n
 		p := p
-		if p.Data != nil {
-			// load as json if it's compliant to the json prefix
-			if f, ok := p.Data.(string); ok && strings.HasPrefix(f, jsonPrefix) {
-				f := f[len(jsonPrefix):]
-				site.SetDataHandler(n, site.jsonFileDataHandler(f))
-			} else {
-				// set it as raw data
-				site.SetDataHandler(n, func(rw http.ResponseWriter, r *http.Request) interface{} {
-					return p.Data
-				})
+		if p.MaxAge <= 0 {
+			p.MaxAge = site.MaxAge
+		}
+		switch {
+		case p.DataType == "json":
+			f, ok := p.Data.(string)
+			if !ok {
+				log.Panicf("invalid data type, page: %s, data: %v", n, p.Data)
 			}
-
+			f = f[len(filePrefix):]
+			site.SetDataHandler(n, site.jsonFileDataHandler(f))
+		case strings.HasPrefix(fmt.Sprintf("%v", p.Data), filePrefix):
+			f, ok := p.Data.(string)
+			if !ok {
+				log.Panicf("invalid data type, page: %s, data: %v", n, p.Data)
+			}
+			f = f[len(filePrefix):]
+			site.SetDataHandler(n, site.fileDataHandler(p.Path, f, p.MaxAge))
+			pp := site.Pages[n]
+			pp.isStatic = true
+			site.Pages[n] = pp
+		default:
+			// serve it as raw data
+			site.SetDataHandler(n, func(rw http.ResponseWriter, r *http.Request) interface{} {
+				return p.Data
+			})
 		}
 	}
 	// re-mapping error handlers
@@ -243,6 +259,9 @@ func (site *Site) ServePage(name string) http.Handler {
 			site.handleError(rw, r, data.Error)
 			return
 		}
+		if site.Pages[name].isStatic {
+			return
+		}
 		if err := site.handlePage(rw, r, name, data); err != nil {
 			log.Printf("error: template:%s, err: %v\n", name, err)
 			site.handleError(rw, r, err)
@@ -251,22 +270,37 @@ func (site *Site) ServePage(name string) http.Handler {
 	})
 }
 
-func (site *Site) ServeStatic(prefix string) http.Handler {
-	return Cache(int64(site.CacheMaxAge.Seconds()))(http.StripPrefix(prefix, http.FileServer(http.Dir(site.Static))))
+func (site *Site) fileDataHandler(prefix string, f string, maxAge time.Duration) DataHandler {
+	return func(rw http.ResponseWriter, r *http.Request) interface{} {
+		ff, err := os.Stat(f)
+		if err != nil {
+			return err
+		}
+		if ff.IsDir() {
+			h := Cache(int64(maxAge.Seconds()))(http.StripPrefix(prefix, http.FileServer(http.Dir(f))))
+			h.ServeHTTP(rw, r)
+			return nil
+		}
+		http.ServeFile(rw, r, f)
+		return nil
+	}
 }
 
 // ServeHTTP serve the configured pages.
 func (site *Site) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	site.once.Do(func() {
 		router := mux.NewRouter()
-		router.PathPrefix(site.StaticPrefix).Handler(site.ServeStatic(site.StaticPrefix))
 		for name, p := range site.Pages {
 			log.Printf("info: register page: %s, path: %s, method: %s\n", name, p.Path, http.MethodGet)
 			h := site.ServePage(name)
 			if p.Auth {
 				h = AuthRequired(site.Login, site.authInfo)(h)
 			}
-			router.Path(p.Path).Methods(http.MethodGet).Handler(h)
+			if p.isStaticDir() {
+				router.PathPrefix(p.Path).Methods(http.MethodGet).Handler(h)
+			} else {
+				router.Path(p.Path).Methods(http.MethodGet).Handler(h)
+			}
 		}
 		router.NotFoundHandler = site.ServePage(PageNotFound)
 		site.router = router
@@ -505,11 +539,6 @@ func (site *Site) jsonFileDataHandler(f string) DataHandler {
 }
 
 func (site *Site) validateSite() error {
-	if site.Static != "" {
-		if _, err := os.Stat(site.Static); err != nil {
-			return fmt.Errorf("static path: %s, err: %w", site.Static, err)
-		}
-	}
 	for l, comps := range site.Layouts {
 		for _, c := range comps {
 			if _, err := os.Stat(c); err != nil {
@@ -552,4 +581,16 @@ func (page *PageData) merge(page1 PageData) {
 		page.Authenticated = page1.Authenticated
 		page.User = page1.User
 	}
+}
+
+func (p Page) isStaticDir() bool {
+	if !p.isStatic {
+		return false
+	}
+	f := p.Data.(string)[len(filePrefix):]
+	ff, err := os.Stat(f)
+	if err != nil {
+		return false
+	}
+	return ff.IsDir()
 }

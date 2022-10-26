@@ -1,4 +1,3 @@
-cache_max_age: 168h
 metadata:
   version: 0.0.1
   lang: en
@@ -15,8 +14,6 @@ metadata:
   description: tiny - ideas worth sharing.
   something: haha this is something.
 reload: true
-static: web/static/
-static_prefix: /static/
 login: /users/login
 #delim_left: "{{"
 #delim_right: "}}"
@@ -27,6 +24,10 @@ layouts:
   blank:
     - web/layout/blank.html
 pages:
+  static:
+    path: /static/
+    data: file://web/static/
+    max_age: 168h
   index:
     path: /
     layout: basic
@@ -35,8 +36,8 @@ pages:
     metadata:
       title: Index
     auth: false
-    # data from json file
-    data: json://web/data/index.json
+    data: file://web/data/index.json
+    data_type: json
   about:
     path: /about
     layout: basic
