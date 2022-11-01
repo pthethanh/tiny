@@ -160,8 +160,6 @@ func NewSite(path string, options ...Option) *Site {
 	for _, opt := range options {
 		opt(&site)
 	}
-	// add default pages if not exists
-	site.addDefaultPagesIfNotExists()
 	// set data handler from JSON file if defined.
 	for n, p := range site.Pages {
 		n := n
@@ -194,6 +192,8 @@ func NewSite(path string, options ...Option) *Site {
 			})
 		}
 	}
+	// add default pages if not exists
+	site.addDefaultPagesIfNotExists()
 	// re-mapping error handlers
 	for p, errs := range site.Errors {
 		for _, err := range errs {
