@@ -39,7 +39,7 @@ pages:
     data: file://web/data/index.json
     data_type: json
   about:
-    path: /about
+    path: /me
     layout: basic
     components:
       - web/views/about.html
@@ -49,6 +49,16 @@ pages:
     # declare data as a map directly
     data:
       about: "Hello, this blog is served by https://github.com/pthethanh/tiny"
+  404:
+    path: /404
+    layout: basic
+    components:
+    - web/views/404.html
+  500:
+    path: /500
+    layout: basic
+    components:
+    - web/views/500.html
 errors:
-  not_found: [404]
-  error: [400, 500]
+  404: [404]
+  500: [400, 500]

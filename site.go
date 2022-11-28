@@ -2,7 +2,6 @@ package tiny
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -20,14 +19,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	//go:embed templates
-	defaultTemplates embed.FS
-)
-
 const (
-	PageNotFound   = "not_found"
-	PageError      = "error"
+	PageNotFound   = "404"
+	PageError      = "500"
 	PageRobotsTxt  = "robots.txt"
 	PageSitemapXML = "sitemap.xml"
 	filePrefix     = "file://"
@@ -192,8 +186,6 @@ func NewSite(path string, options ...Option) *Site {
 			})
 		}
 	}
-	// add default pages if not exists
-	site.addDefaultPagesIfNotExists()
 	// re-mapping error handlers
 	for p, errs := range site.Errors {
 		for _, err := range errs {
@@ -341,25 +333,6 @@ func (site *Site) SetRobotsTXTDataHandler(name string, h RobotsTXTDataHandler) e
 	})
 }
 
-func (site *Site) addDefaultPagesIfNotExists() {
-	if _, ok := site.Pages[PageRobotsTxt]; !ok {
-		site.addDefaultRobotsTxt()
-	}
-	if _, ok := site.Pages[PageSitemapXML]; !ok {
-		site.addDefaultSiteMap()
-	}
-	if _, ok := site.Pages[PageError]; !ok {
-		site.addEmbedPage(PageError, defaultTemplates, "templates/error.html", Page{
-			Path: "/error",
-		})
-	}
-	if _, ok := site.Pages[PageNotFound]; !ok {
-		site.addEmbedPage(PageNotFound, defaultTemplates, "templates/not_found.html", Page{
-			Path: "/404",
-		})
-	}
-}
-
 // getPageMetaData get metadata from config.
 func (site *Site) getPageMetaData(name string) MetaData {
 	page, ok := site.Pages[name]
@@ -407,17 +380,13 @@ func (site *Site) parseTemplate(name string) (*template.Template, error) {
 		tplName = fmt.Sprintf("%s.html", tplName)
 	}
 	// load predefined template with default delims.
-	tpl, err := template.New(tplName).Delims(DefaultDelimLeft, DefaultDelimRight).Funcs(site.funcs).ParseFS(defaultTemplates, "templates/common.html")
-	if err != nil {
-		log.Printf("error: parse common template, err: %v\n", err)
-		return nil, err
-	}
+	tpl = template.New(tplName).Delims(DefaultDelimLeft, DefaultDelimRight).Funcs(site.funcs)
 	// delims can be overridden page by page.
 	delimLeft, delimRight := page.DelimLeft, page.DelimRight
 	if delimLeft == "" || delimRight == "" {
 		delimLeft, delimRight = site.DelimLeft, site.DelimRight
 	}
-	tpl, err = tpl.Delims(delimLeft, delimRight).ParseFiles(files...)
+	tpl, err := tpl.Delims(delimLeft, delimRight).ParseFiles(files...)
 	if err != nil {
 		log.Printf("error: parse template, err: %v\n", err)
 		return nil, err
@@ -452,52 +421,6 @@ func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string
 		return err
 	}
 	return nil
-}
-
-// addEmbedPage add default pages, ready to use.
-// Notes that default pages should use default delims [[]]
-func (site *Site) addEmbedPage(name string, fs embed.FS, pattern string, p Page) {
-	t, err := template.New(path.Base(pattern)).Delims(DefaultDelimLeft, DefaultDelimRight).Funcs(site.funcs).ParseFS(fs, pattern)
-	if err != nil {
-		log.Panic(err)
-	}
-	p.embed = true
-	site.templates[name] = t
-	site.Pages[name] = p
-}
-
-func (site *Site) addDefaultSiteMap() {
-	site.addEmbedPage(PageSitemapXML, defaultTemplates, "templates/sitemap.xml", Page{
-		Path: "/sitemap.xml",
-		DataHandler: func(rw http.ResponseWriter, r *http.Request) interface{} {
-			return SiteMap{
-				URLSet: []SiteMapURL{
-					{
-						Loc:        "/",
-						LastMod:    time.Now(),
-						ChangeFreq: "daily",
-						Priority:   1,
-					},
-				},
-			}
-		},
-	})
-}
-
-func (site *Site) addDefaultRobotsTxt() {
-	site.addEmbedPage(PageRobotsTxt, defaultTemplates, "templates/robots.txt", Page{
-		Path: "/robots.txt",
-		DataHandler: func(rw http.ResponseWriter, r *http.Request) interface{} {
-			return RobotsTXT{
-				UserAgents: []UserAgent{
-					{
-						UserAgent: "*",
-						Allow:     []string{"/"},
-					},
-				},
-			}
-		},
-	})
 }
 
 func (page PageData) GetCookie(k string) string {
