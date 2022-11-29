@@ -246,6 +246,10 @@ func (site *Site) getFullPageData(pageName string, rw http.ResponseWriter, r *ht
 
 func (site *Site) ServePage(name string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if _, ok := site.Pages[name]; !ok {
+			http.Error(rw, "Page Not Found", http.StatusNotFound)
+			return
+		}
 		data := site.getFullPageData(name, rw, r)
 		if data.Error != nil {
 			site.handleError(rw, r, data.Error)
@@ -399,6 +403,10 @@ func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error
 	name := PageError
 	if t, ok := site.errors[ErrorFromErr(err).Code()]; ok {
 		name = t
+	}
+	if _, ok := site.Pages[name]; !ok {
+		http.Error(rw, "Page Not Found", http.StatusNotFound)
+		return
 	}
 	data := site.getFullPageData(name, rw, r)
 	data.Error = err
