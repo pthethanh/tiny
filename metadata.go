@@ -54,6 +54,9 @@ func (m MetaData) KeyWords() []string {
 		}
 		return rs
 	}
+	if v, ok := v.([]string); ok {
+		return v
+	}
 	return []string{fmt.Sprintf("%v", m["key_words"])}
 }
 
