@@ -258,7 +258,7 @@ func (site *Site) ServePage(name string) http.Handler {
 		if site.Pages[name].isStatic {
 			return
 		}
-		data.MetaData.SetCanonicalURL(path.Join(data.MetaData.BaseURL(), r.URL.Path))
+		data.MetaData.SetCanonicalURL(data.MetaData.BaseURL() + r.URL.Path)
 		if err := site.handlePage(rw, r, name, data); err != nil {
 			log.Printf("error: template:%s, err: %v\n", name, err)
 			site.handleError(rw, r, err)
