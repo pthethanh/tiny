@@ -42,11 +42,10 @@ type (
 		Layouts    map[string][]string `yaml:"layouts"`
 		Pages      map[string]Page     `yaml:"pages"`
 		Errors     map[string][]int    `yaml:"errors"`
-		Validate   bool                `yaml:"validate"`
 		DelimLeft  string              `yaml:"delim_left"`
 		DelimRight string              `yaml:"delim_right"`
+		StaticSite StaticSite          `yaml:"static_site"`
 
-		once      sync.Once
 		router    *mux.Router
 		templates map[string]*template.Template
 		mu        sync.RWMutex
@@ -69,7 +68,6 @@ type (
 		MaxAge      time.Duration `yaml:"max_age"`
 		DataHandler DataHandler   `yaml:"-"`
 
-		embed    bool
 		isStatic bool
 	}
 	// PageData hold basic data of a web page.
@@ -142,11 +140,11 @@ func NewSite(path string, options ...Option) *Site {
 		mu:         sync.RWMutex{},
 		funcs:      funcs.FuncMap(),
 		templates:  make(map[string]*template.Template),
-		Validate:   true,
 		DelimLeft:  DefaultDelimLeft,
 		DelimRight: DefaultDelimRight,
 		MaxAge:     30 * 24 * time.Hour,
 	}
+	// parse config
 	if err := yaml.Unmarshal(b, &site); err != nil {
 		log.Panic(err)
 	}
@@ -154,7 +152,24 @@ func NewSite(path string, options ...Option) *Site {
 	for _, opt := range options {
 		opt(&site)
 	}
-	// set data handler from JSON file if defined.
+	// re-mapping error handlers
+	for p, errs := range site.Errors {
+		for _, err := range errs {
+			site.errors[err] = p
+		}
+	}
+	// setup handlers and routers
+	site.setupDataHandlers()
+	site.setupRouter()
+
+	// validate site config
+	if err := site.validateSite(); err != nil {
+		log.Panic(err)
+	}
+	return &site
+}
+
+func (site *Site) setupDataHandlers() {
 	for n, p := range site.Pages {
 		n := n
 		p := p
@@ -186,30 +201,35 @@ func NewSite(path string, options ...Option) *Site {
 			})
 		}
 	}
-	// re-mapping error handlers
-	for p, errs := range site.Errors {
-		for _, err := range errs {
-			site.errors[err] = p
-		}
-	}
-	// validate site data
-	if err := site.validateSite(); err != nil {
-		if site.Validate {
-			log.Panic(err)
-		}
-		log.Printf("warn: invalid config file: %v\n", err)
-	}
-	return &site
 }
 
-// GetPageData get common data from configuration and request.
-// Note this function doesn't trigger the data handler of this page.
-func (site *Site) GetPageData(pageName string, rw http.ResponseWriter, r *http.Request) PageData {
+func (site *Site) setupRouter() {
+	router := mux.NewRouter()
+	for name, p := range site.Pages {
+		log.Printf("info: register page: %s, path: %s, method: %s\n", name, p.Path, http.MethodGet)
+		h := site.getPageHandler(name)
+		if p.Auth {
+			h = AuthRequired(site.Login, site.authInfo)(h)
+		}
+		if p.isStaticDir() {
+			router.PathPrefix(p.Path).Methods(http.MethodGet).Handler(h)
+		} else {
+			router.Path(p.Path).Methods(http.MethodGet).Handler(h)
+		}
+	}
+	router.NotFoundHandler = site.getPageHandler(PageNotFound)
+	site.router = router
+}
+
+// getPageData get common data from configuration and request.
+func (site *Site) getPageData(pageName string, rw http.ResponseWriter, r *http.Request) PageData {
+	// get claims information.
 	var claims interface{}
 	authenticated := false
 	if site.authInfo != nil {
 		claims, authenticated = site.authInfo(r.Context())
 	}
+	// get metadata
 	data := PageData{
 		MetaData:      site.getPageMetaData(pageName),
 		Authenticated: authenticated,
@@ -217,15 +237,11 @@ func (site *Site) GetPageData(pageName string, rw http.ResponseWriter, r *http.R
 		Error:         nil,
 		Cookies:       make(map[string]*http.Cookie),
 	}
+	// collect cookies if any.
 	for _, ck := range r.Cookies() {
 		data.Cookies[ck.Name] = ck
 	}
-	return data
-}
-
-// getFullPageData get common data from configuration and request.
-func (site *Site) getFullPageData(pageName string, rw http.ResponseWriter, r *http.Request) PageData {
-	data := site.GetPageData(pageName, rw, r)
+	// get data from data handler if any
 	p, ok := site.Pages[pageName]
 	if ok && p.DataHandler != nil {
 		d := p.DataHandler(rw, r)
@@ -244,13 +260,13 @@ func (site *Site) getFullPageData(pageName string, rw http.ResponseWriter, r *ht
 	return data
 }
 
-func (site *Site) ServePage(name string) http.Handler {
+func (site *Site) getPageHandler(name string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if _, ok := site.Pages[name]; !ok {
 			http.Error(rw, "Page Not Found", http.StatusNotFound)
 			return
 		}
-		data := site.getFullPageData(name, rw, r)
+		data := site.getPageData(name, rw, r)
 		if data.Error != nil {
 			site.handleError(rw, r, data.Error)
 			return
@@ -274,7 +290,7 @@ func (site *Site) fileDataHandler(prefix string, f string, maxAge time.Duration)
 			return err
 		}
 		if ff.IsDir() {
-			h := Cache(int64(maxAge.Seconds()))(http.StripPrefix(prefix, http.FileServer(http.Dir(f))))
+			h := Cache(maxAge)(http.StripPrefix(prefix, http.FileServer(http.Dir(f))))
 			h.ServeHTTP(rw, r)
 			return nil
 		}
@@ -285,23 +301,10 @@ func (site *Site) fileDataHandler(prefix string, f string, maxAge time.Duration)
 
 // ServeHTTP serve the configured pages.
 func (site *Site) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	site.once.Do(func() {
-		router := mux.NewRouter()
-		for name, p := range site.Pages {
-			log.Printf("info: register page: %s, path: %s, method: %s\n", name, p.Path, http.MethodGet)
-			h := site.ServePage(name)
-			if p.Auth {
-				h = AuthRequired(site.Login, site.authInfo)(h)
-			}
-			if p.isStaticDir() {
-				router.PathPrefix(p.Path).Methods(http.MethodGet).Handler(h)
-			} else {
-				router.Path(p.Path).Methods(http.MethodGet).Handler(h)
-			}
-		}
-		router.NotFoundHandler = site.ServePage(PageNotFound)
-		site.router = router
-	})
+	if site.StaticSite.Enable {
+		site.staticGeneratorHandler()(site.router).ServeHTTP(rw, r)
+		return
+	}
 	site.router.ServeHTTP(rw, r)
 }
 
@@ -359,10 +362,6 @@ func (site *Site) getPageMetaData(name string) MetaData {
 // parseTemplate parse the template base on the given config name.
 func (site *Site) parseTemplate(name string) (*template.Template, error) {
 	tpl, loaded := site.templates[name]
-	// if it's embed template, no need  to parse again.
-	if loaded && site.Pages[name].embed {
-		return tpl, nil
-	}
 	// if loaded and Reload is disabled, return.
 	if loaded && !site.Reload {
 		return tpl, nil
@@ -409,7 +408,7 @@ func (site *Site) handleError(rw http.ResponseWriter, r *http.Request, err error
 		http.Error(rw, "Page Not Found", http.StatusNotFound)
 		return
 	}
-	data := site.getFullPageData(name, rw, r)
+	data := site.getPageData(name, rw, r)
 	data.Error = err
 	if err := site.handlePage(rw, r, name, data); err != nil {
 		log.Printf("error: serve error page, err: %v\n", err)
@@ -424,7 +423,7 @@ func (site *Site) handlePage(w http.ResponseWriter, r *http.Request, name string
 		return err
 	}
 	if data == nil {
-		data = site.getFullPageData(name, w, r)
+		data = site.getPageData(name, w, r)
 	}
 	if err := t.Execute(w, data); err != nil {
 		return err

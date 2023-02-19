@@ -3,21 +3,22 @@ package tiny
 import (
 	"fmt"
 	"net/http"
+	"time"
 )
 
 const (
-	defaultMaxAge = 30 * 24 * 3600
+	defaultMaxAge = 30 * 24 * time.Hour
 )
 
 // Cache cache static resources.
-func Cache(maxAge int64) func(http.Handler) http.Handler {
+func Cache(maxAge time.Duration) func(http.Handler) http.Handler {
 	if maxAge == 0 {
 		maxAge = defaultMaxAge
 	}
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", maxAge))
+				w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int64(maxAge.Seconds())))
 				h.ServeHTTP(w, r)
 			})
 	}
